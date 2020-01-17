@@ -115,10 +115,10 @@ int ff_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
 int ff_poll(struct pollfd fds[], nfds_t nfds, int timeout);
 
 int ff_kqueue(void);
-int ff_kevent(int kq, const struct kevent *changelist, int nchanges, 
+int ff_kevent(int kq, const struct kevent *changelist, int nchanges,
     struct kevent *eventlist, int nevents, const struct timespec *timeout);
-int ff_kevent_do_each(int kq, const struct kevent *changelist, int nchanges, 
-    void *eventlist, int nevents, const struct timespec *timeout, 
+int ff_kevent_do_each(int kq, const struct kevent *changelist, int nchanges,
+    void *eventlist, int nevents, const struct timespec *timeout,
     void (*do_each)(void **, struct kevent *));
 
 int ff_gettimeofday(struct timeval *tv, struct timezone *tz);
@@ -185,6 +185,7 @@ int ff_route_ctl(enum FF_ROUTE_CTL req, enum FF_ROUTE_FLAG flag,
 typedef int (*dispatch_func_t)(void *data, uint16_t *len,
     uint16_t queue_id, uint16_t nb_queues);
 
+// zhou: used to manually decide which queue should handle this RX packet
 /* regist a packet dispath function */
 void ff_regist_packet_dispatcher(dispatch_func_t func);
 
@@ -226,4 +227,3 @@ int ff_ngctl(int cmd, void *data);
 }
 #endif
 #endif
-

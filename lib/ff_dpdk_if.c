@@ -103,9 +103,11 @@ struct lcore_conf lcore_conf;
 
 struct rte_mempool *pktmbuf_pool[NB_SOCKETS];
 
+// zhou: used to transfer packets between queues of same port, like deferred queue,
 static struct rte_ring **dispatch_ring[RTE_MAX_ETHPORTS];
 static dispatch_func_t packet_dispatcher;
 
+// zhou:
 static uint16_t rss_reta_size[RTE_MAX_ETHPORTS];
 
 #define BOND_DRIVER_NAME    "net_bonding"
@@ -119,11 +121,17 @@ struct ff_msg_ring {
     struct rte_ring *ring[FF_MSG_NUM];
 } __rte_cache_aligned;
 
+// zhou: used for debug tool, ring[0] used put request from debug tool,
+//       and ring[1] used to put response from each instance.
 static struct ff_msg_ring msg_ring[RTE_MAX_LCORE];
+
+// zhou: buffer for IPC messages
 static struct rte_mempool *message_pool;
 static struct ff_dpdk_if_context *veth_ctx[RTE_MAX_ETHPORTS];
 
 static struct ff_top_args ff_top_status;
+
+// zhou: used in debug tool "traffic"
 static struct ff_traffic_args ff_traffic;
 extern void ff_hardclock(void);
 
@@ -174,9 +182,11 @@ check_all_ports_link_status(void)
     nb_ports = ff_global_cfg.dpdk.nb_ports;
     for (count = 0; count <= MAX_CHECK_TIME; count++) {
         all_ports_up = 1;
+
         for (i = 0; i < nb_ports; i++) {
             uint16_t portid = ff_global_cfg.dpdk.portid_list[i];
             memset(&link, 0, sizeof(link));
+            // zhou: get link status
             rte_eth_link_get_nowait(portid, &link);
 
             /* print link status if flag set */
@@ -192,6 +202,9 @@ check_all_ports_link_status(void)
                 }
                 continue;
             }
+
+            // zhou: have to wait for all links up ?
+
             /* clear all_ports_up flag if any link down */
             if (link.link_status == 0) {
                 all_ports_up = 0;
@@ -220,11 +233,13 @@ check_all_ports_link_status(void)
 static int
 init_lcore_conf(void)
 {
+    // zhou: total number DPDK port, ethDev recognized by DPDK.
     uint8_t nb_dev_ports = rte_eth_dev_count_avail();
     if (nb_dev_ports == 0) {
         rte_exit(EXIT_FAILURE, "No probed ethernet devices\n");
     }
 
+    // zhou: the max DPDK port id always smaller than DPDK port number.
     if (ff_global_cfg.dpdk.max_portid >= nb_dev_ports) {
         rte_exit(EXIT_FAILURE, "this machine doesn't have port %d.\n",
                  ff_global_cfg.dpdk.max_portid);
@@ -236,6 +251,7 @@ init_lcore_conf(void)
     uint16_t proc_id;
     for (proc_id = 0; proc_id < ff_global_cfg.dpdk.nb_procs; proc_id++) {
         uint16_t lcore_id = ff_global_cfg.dpdk.proc_lcore[proc_id];
+        // zhou: "lcore_config" comes from DPDK.
         if (!lcore_config[lcore_id].detected) {
             rte_exit(EXIT_FAILURE, "lcore %u unavailable\n", lcore_id);
         }
@@ -248,23 +264,34 @@ init_lcore_conf(void)
 
     lcore_conf.socket_id = socket_id;
 
+    // zhou: DPDK lcore id, this process instance running.
     uint16_t lcore_id = ff_global_cfg.dpdk.proc_lcore[lcore_conf.proc_id];
     int j;
+    // zhou: go through all user defined ports
     for (j = 0; j < ff_global_cfg.dpdk.nb_ports; ++j) {
+        // zhou: get DPDK port id
         uint16_t port_id = ff_global_cfg.dpdk.portid_list[j];
+        // zhou: find the port detailed configuration.
         struct ff_port_cfg *pconf = &ff_global_cfg.dpdk.port_cfgs[port_id];
 
         int queueid = -1;
         int i;
         for (i = 0; i < pconf->nb_lcores; i++) {
+            // zhou: current instance should handle this port
             if (pconf->lcore_list[i] == lcore_id) {
+                // zhou: queueid is sequential.
                 queueid = i;
             }
         }
+
+        // zhou: this instance doesn't need to handle this port.
         if (queueid < 0) {
             continue;
         }
+
+        // zhou: this proc is running on "lcore_id", will handle "port_id" "queue"
         printf("lcore: %u, port: %u, queue: %u\n", lcore_id, port_id, queueid);
+
         uint16_t nb_rx_queue = lcore_conf.nb_rx_queue;
         lcore_conf.rx_queue_list[nb_rx_queue].port_id = port_id;
         lcore_conf.rx_queue_list[nb_rx_queue].queue_id = queueid;
@@ -279,6 +306,7 @@ init_lcore_conf(void)
             ff_enable_pcap(ff_global_cfg.pcap.save_path, ff_global_cfg.pcap.snap_len);
         }
 
+        lcore_conf.pcap[port_id] = pconf->pcap;
         lcore_conf.nb_queue_list[port_id] = pconf->nb_lcores;
     }
 
@@ -314,8 +342,11 @@ init_mem_pool(void)
     uint16_t i, lcore_id;
     char s[64];
 
+    // zhou: the loop just for init memory for different CPU socket in NUMA.
     for (i = 0; i < ff_global_cfg.dpdk.nb_procs; i++) {
+
         lcore_id = ff_global_cfg.dpdk.proc_lcore[i];
+
         if (numa_on) {
             socketid = rte_lcore_to_socket_id(lcore_id);
         }
@@ -329,8 +360,10 @@ init_mem_pool(void)
             continue;
         }
 
+        // zhou: only primary process can alloc memory.
         if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
             snprintf(s, sizeof(s), "mbuf_pool_%d", socketid);
+
             pktmbuf_pool[socketid] =
                 rte_pktmbuf_pool_create(s, nb_mbuf,
                     MEMPOOL_CACHE_SIZE, 0,
@@ -345,7 +378,7 @@ init_mem_pool(void)
         } else {
             printf("create mbuf pool on socket %d\n", socketid);
         }
-        
+
 #ifdef FF_USE_PAGE_ARRAY
         nb_mbuf = RTE_ALIGN_CEIL (
             nb_ports*nb_lcores*MAX_PKT_BURST    +
@@ -381,6 +414,7 @@ create_ring(const char *name, unsigned count, int socket_id, unsigned flags)
     return ring;
 }
 
+// zhou: alloc ring for each queue of each port.
 static int
 init_dispatch_ring(void)
 {
@@ -392,16 +426,19 @@ init_dispatch_ring(void)
 
     /* Create ring according to ports actually being used. */
     int nb_ports = ff_global_cfg.dpdk.nb_ports;
+
     for (j = 0; j < nb_ports; j++) {
         uint16_t portid = ff_global_cfg.dpdk.portid_list[j];
         struct ff_port_cfg *pconf = &ff_global_cfg.dpdk.port_cfgs[portid];
         int nb_queues = pconf->nb_lcores;
+
         if (dispatch_ring[portid] == NULL) {
             snprintf(name_buf, RTE_RING_NAMESIZE, "ring_ptr_p%d", portid);
 
             dispatch_ring[portid] = rte_zmalloc(name_buf,
                 sizeof(struct rte_ring *) * nb_queues,
                 RTE_CACHE_LINE_SIZE);
+
             if (dispatch_ring[portid] == NULL) {
                 rte_exit(EXIT_FAILURE, "rte_zmalloc(%s (struct rte_ring*)) "
                     "failed\n", name_buf);
@@ -409,6 +446,7 @@ init_dispatch_ring(void)
         }
 
         for(queueid = 0; queueid < nb_queues; ++queueid) {
+
             snprintf(name_buf, RTE_RING_NAMESIZE, "dispatch_ring_p%d_q%d",
                 portid, queueid);
             dispatch_ring[portid][queueid] = create_ring(name_buf,
@@ -431,11 +469,13 @@ ff_msg_init(struct rte_mempool *mp,
     void *obj, __attribute__((unused)) unsigned i)
 {
     struct ff_msg *msg = (struct ff_msg *)obj;
+
     msg->msg_type = FF_UNKNOWN;
     msg->buf_addr = (char *)msg + sizeof(struct ff_msg);
     msg->buf_len = mp->elt_size - sizeof(struct ff_msg);
 }
 
+// zhou: message from debug tools.
 static int
 init_msg_ring(void)
 {
@@ -488,6 +528,7 @@ init_kni(void)
     if(strcasecmp(ff_global_cfg.kni.method, "accept") == 0)
         kni_accept = 1;
 
+    // zhou: memory allocation
     ff_kni_init(nb_ports, ff_global_cfg.kni.tcp_port,
         ff_global_cfg.kni.udp_port);
 
@@ -495,9 +536,12 @@ init_kni(void)
     struct rte_mempool *mbuf_pool = pktmbuf_pool[socket_id];
 
     nb_ports = ff_global_cfg.dpdk.nb_ports;
+
     int i, ret;
     for (i = 0; i < nb_ports; i++) {
         uint16_t port_id = ff_global_cfg.dpdk.portid_list[i];
+
+        // zhou: create a vEth for each ethDev.
         ff_kni_alloc(port_id, socket_id, mbuf_pool, KNI_QUEUE_SIZE);
     }
 
@@ -505,6 +549,7 @@ init_kni(void)
 }
 #endif
 
+// zhou: README,
 static void
 set_rss_table(uint16_t port_id, uint16_t reta_size, uint16_t nb_queues)
 {
@@ -530,6 +575,7 @@ set_rss_table(uint16_t port_id, uint16_t reta_size, uint16_t nb_queues)
     }
 }
 
+// zhou:
 static int
 init_port_start(void)
 {
@@ -541,6 +587,11 @@ init_port_start(void)
     for (i = 0; i < nb_ports; i++) {
         uint16_t port_id, u_port_id = ff_global_cfg.dpdk.portid_list[i];
         struct ff_port_cfg *pconf = &ff_global_cfg.dpdk.port_cfgs[u_port_id];
+
+        // zhou: according the number of lcores which will handle this port, we
+        //       will create the same number of queues.
+        //       It means that each lcore will handle a pair of RX/TX queue.
+
         uint16_t nb_queues = pconf->nb_lcores;
 
         for (j=0; j<=pconf->nb_slaves; j++) {
@@ -558,6 +609,7 @@ init_port_start(void)
             struct rte_eth_rxconf rxq_conf;
             struct rte_eth_txconf txq_conf;
 
+        // zhou: fetch device hardware capability to verify queue number.
             rte_eth_dev_info_get(port_id, &dev_info);
 
             if (nb_queues > dev_info.max_rx_queues) {
@@ -572,6 +624,7 @@ init_port_start(void)
                     dev_info.max_tx_queues);
             }
 
+        // zhou: get local port MAC address.
             struct ether_addr addr;
             rte_eth_macaddr_get(port_id, &addr);
             printf("Port %u MAC: %02" PRIx8 " %02" PRIx8 " %02" PRIx8
@@ -674,10 +727,12 @@ init_port_start(void)
                     dev_info.reta_size);
             }
 
+        // zhou: why not check earlier
             if (rte_eal_process_type() != RTE_PROC_PRIMARY) {
                 continue;
             }
 
+        // zhou: config ethdev
             int ret = rte_eth_dev_configure(port_id, nb_queues, nb_queues, &port_conf);
             if (ret != 0) {
                 return ret;
@@ -744,12 +799,13 @@ init_port_start(void)
                             ff_global_cfg.dpdk.bond_cfgs->name, slaves[x]);
                 }
             }
-
+        // zhou: enable ethdev.
             ret = rte_eth_dev_start(port_id);
             if (ret < 0) {
                 return ret;
             }
 
+        // zhou: why set RSS again ?
             if (nb_queues > 1) {
                 /* set HW rss hash function to Toeplitz. */
                 if (!rte_eth_dev_filter_supported(port_id, RTE_ETH_FILTER_HASH)) {
@@ -777,6 +833,11 @@ init_port_start(void)
                     printf("set port %u to promiscuous mode error\n", port_id);
                 }
             }
+
+            /* Enable pcap dump */
+            if (pconf->pcap) {
+                ff_enable_pcap(pconf->pcap);
+            }
         }
     }
 
@@ -787,10 +848,12 @@ init_port_start(void)
     return 0;
 }
 
+// zhou: timer system
 static int
 init_clock(void)
 {
     rte_timer_subsystem_init();
+
     uint64_t hz = rte_get_timer_hz();
     uint64_t intrs = MS_PER_S/ff_global_cfg.freebsd.hz;
     uint64_t tsc = (hz + MS_PER_S - 1) / MS_PER_S*intrs;
@@ -804,6 +867,7 @@ init_clock(void)
     return 0;
 }
 
+// zhou:
 int
 ff_dpdk_init(int argc, char **argv)
 {
@@ -817,6 +881,7 @@ ff_dpdk_init(int argc, char **argv)
         exit(1);
     }
 
+
     int ret = rte_eal_init(argc, argv);
     if (ret < 0) {
         rte_exit(EXIT_FAILURE, "Error with EAL initialization\n");
@@ -828,6 +893,7 @@ ff_dpdk_init(int argc, char **argv)
     pkt_tx_delay = ff_global_cfg.dpdk.pkt_tx_delay > BURST_TX_DRAIN_US ? \
         BURST_TX_DRAIN_US : ff_global_cfg.dpdk.pkt_tx_delay;
 
+    // zhou: find relationship between lcore, proc, queue.
     init_lcore_conf();
 
     init_mem_pool();
@@ -847,6 +913,7 @@ ff_dpdk_init(int argc, char **argv)
     ff_mmap_init();
 #endif
 
+    // zhou: config and start ethdev
     ret = init_port_start();
     if (ret < 0) {
         rte_exit(EXIT_FAILURE, "init_port_start failed\n");
@@ -857,6 +924,7 @@ ff_dpdk_init(int argc, char **argv)
     return 0;
 }
 
+// zhou: handle received packets
 static void
 ff_veth_input(const struct ff_dpdk_if_context *ctx, struct rte_mbuf *pkt)
 {
@@ -897,6 +965,7 @@ ff_veth_input(const struct ff_dpdk_if_context *ctx, struct rte_mbuf *pkt)
         prev = mb;
     }
 
+    // zhou: hand over to FreeBSD
     ff_veth_process_packet(ctx->ifp, hdr);
 }
 
@@ -1005,6 +1074,15 @@ pktmbuf_deep_clone(const struct rte_mbuf *md,
     return mc;
 }
 
+// zhou: handle RX packets, "pkts_from_ring"
+//       1. false, packets received from ethDev. All messages will be handled,
+//       only ARP packet will be copied to other queues of same port.
+//       2. true, ARP packets from other queues of same port.
+//
+//       There is a special case, user defined callback function "packet_dispatcher()"
+//       want adjust the queue (different queue handled by different instances).
+//       Then the packets could also be transfered from one queue to another queue of
+//       the same port.
 static inline void
 process_packets(uint16_t port_id, uint16_t queue_id, struct rte_mbuf **bufs,
     uint16_t count, const struct ff_dpdk_if_context *ctx, int pkts_from_ring)
@@ -1022,6 +1100,7 @@ process_packets(uint16_t port_id, uint16_t queue_id, struct rte_mbuf **bufs,
             }
         }
 
+        // zhou: A macro that points to the start of the data in the mbuf.
         void *data = rte_pktmbuf_mtod(rtem, void*);
         uint16_t len = rte_pktmbuf_data_len(rtem);
 
@@ -1031,6 +1110,7 @@ process_packets(uint16_t port_id, uint16_t queue_id, struct rte_mbuf **bufs,
         }
 
         if (!pkts_from_ring && packet_dispatcher) {
+            // zhou: check whether need to transfer packet to other instance to handle.
             int ret = (*packet_dispatcher)(data, &len, queue_id, nb_queues);
             if (ret == FF_DISPATCH_RESPONSE) {
                 rte_pktmbuf_pkt_len(rtem) = rte_pktmbuf_data_len(rtem) = len;
@@ -1053,11 +1133,14 @@ process_packets(uint16_t port_id, uint16_t queue_id, struct rte_mbuf **bufs,
                 continue;
             }
 
+            // zhou: mistake happen, drop this packet
             if (ret == FF_DISPATCH_ERROR || ret >= nb_queues) {
                 rte_pktmbuf_free(rtem);
                 continue;
             }
 
+            // zhou: transfer packet from this queue to callback function
+            //       "packet_dispatcher" specified queue if has.
             if (ret != queue_id) {
                 ret = rte_ring_enqueue(dispatch_ring[port_id][ret], rtem);
                 if (ret < 0)
@@ -1067,20 +1150,29 @@ process_packets(uint16_t port_id, uint16_t queue_id, struct rte_mbuf **bufs,
             }
         }
 
+        // zhou: at this point, means current instance need to handle this packet.
+
+        // zhou: inspect packet content.
         enum FilterReturn filter = protocol_filter(data, len);
 #ifdef INET6
         if (filter == FILTER_ARP || filter == FILTER_NDP) {
 #else
+        // zhou: ARP special handling.
         if (filter == FILTER_ARP) {
 #endif
             struct rte_mempool *mbuf_pool;
             struct rte_mbuf *mbuf_clone;
+
             if (!pkts_from_ring) {
                 uint16_t j;
                 for(j = 0; j < nb_queues; ++j) {
                     if(j == queue_id)
                         continue;
 
+                    // zhou: make a copy for all other queue of this port, make sure
+                    //       all instances could learn from this ARP packet !!!
+                    //       Since all instance own their own FreeBSD stack, the stack
+                    //       need to utilize the ARP message.
                     unsigned socket_id = 0;
                     if (numa_on) {
                         uint16_t lcore_id = qconf->port_cfgs[port_id].lcore_list[j];
@@ -1088,6 +1180,7 @@ process_packets(uint16_t port_id, uint16_t queue_id, struct rte_mbuf **bufs,
                     }
                     mbuf_pool = pktmbuf_pool[socket_id];
                     mbuf_clone = pktmbuf_deep_clone(rtem, mbuf_pool);
+
                     if(mbuf_clone) {
                         int ret = rte_ring_enqueue(dispatch_ring[port_id][j],
                             mbuf_clone);
@@ -1098,7 +1191,9 @@ process_packets(uint16_t port_id, uint16_t queue_id, struct rte_mbuf **bufs,
             }
 
 #ifdef FF_KNI
+            // zhou: this ARP packet also copy to kernel stack in Primary instance.
             if (enable_kni && rte_eal_process_type() == RTE_PROC_PRIMARY) {
+
                 mbuf_pool = pktmbuf_pool[qconf->socket_id];
                 mbuf_clone = pktmbuf_deep_clone(rtem, mbuf_pool);
                 if(mbuf_clone) {
@@ -1106,19 +1201,26 @@ process_packets(uint16_t port_id, uint16_t queue_id, struct rte_mbuf **bufs,
                 }
             }
 #endif
+            // zhou: hand over this ARP packet to this instance's FreeBSD Stack.
             ff_veth_input(ctx, rtem);
+
 #ifdef FF_KNI
         } else if (enable_kni &&
             ((filter == FILTER_KNI && kni_accept) ||
             (filter == FILTER_UNKNOWN && !kni_accept)) ) {
+
+            // zhou: according filter, bufferred in queue to be handled by KNI.
+            //       vEth -> kernel stack -> slow app.
             ff_kni_enqueue(port_id, rtem);
 #endif
         } else {
+            // zhou: all other Fast Path packets will be handled by FreeBSD stack.
             ff_veth_input(ctx, rtem);
         }
     }
 }
 
+// zhou: handle dispatch ring (deferred queue).
 static inline int
 process_dispatch_ring(uint16_t port_id, uint16_t queue_id,
     struct rte_mbuf **pkts_burst, const struct ff_dpdk_if_context *ctx)
@@ -1230,7 +1332,7 @@ handle_ipfw_msg(struct ff_msg *msg)
         case FF_IPFW_SET:
             ret = ff_setsockopt_freebsd(fd, msg->ipfw.level,
                 msg->ipfw.optname, msg->ipfw.optval,
-                *(msg->ipfw.optlen)); 
+                *(msg->ipfw.optlen));
             break;
         default:
             ret = -1;
@@ -1249,6 +1351,7 @@ done:
 }
 #endif
 
+// zhou: used in debug tool.
 static inline void
 handle_traffic_msg(struct ff_msg *msg)
 {
@@ -1262,6 +1365,7 @@ handle_default_msg(struct ff_msg *msg)
     msg->result = ENOTSUP;
 }
 
+// zhou: handle request from debug tools (./tool/)
 static inline void
 handle_msg(struct ff_msg *msg, uint16_t proc_id)
 {
@@ -1298,6 +1402,7 @@ handle_msg(struct ff_msg *msg, uint16_t proc_id)
             handle_default_msg(msg);
             break;
     }
+    // zhou: put response in ring[1].
     rte_ring_enqueue(msg_ring[proc_id].ring[msg->msg_type], msg);
 }
 
@@ -1328,12 +1433,16 @@ send_burst(struct lcore_conf *qconf, uint16_t n, uint8_t port)
     if (unlikely(ff_global_cfg.pcap.enable)) {
         uint16_t i;
         for (i = 0; i < n; i++) {
-            ff_dump_packets( ff_global_cfg.pcap.save_path, m_table[i], 
-               ff_global_cfg.pcap.snap_len, ff_global_cfg.pcap.save_len);
+            ff_dump_packets( ff_global_cfg.pcap.save_path, m_table[i],
+                ff_global_cfg.pcap.snap_len, ff_global_cfg.pcap.save_len);
         }
     }
-    
+
+    // zhou: memory will be freed once send successful, otherwise user should
+    //       handle it.
+
     ret = rte_eth_tx_burst(port, queueid, m_table, n);
+    // zhou: update statistics
     ff_traffic.tx_packets += ret;
     uint16_t i;
     for (i = 0; i < ret; i++) {
@@ -1342,9 +1451,10 @@ send_burst(struct lcore_conf *qconf, uint16_t n, uint8_t port)
         if (qconf->tx_mbufs[port].bsd_m_table[i])
             ff_enq_tx_bsdmbuf(port, qconf->tx_mbufs[port].bsd_m_table[i], m_table[i]->nb_segs);
 #endif
-    }    
+    }
     if (unlikely(ret < n)) {
         do {
+            // zhou: send failure.
             rte_pktmbuf_free(m_table[ret]);
 #ifdef FF_USE_PAGE_ARRAY
             if ( qconf->tx_mbufs[port].bsd_m_table[ret] )
@@ -1355,6 +1465,9 @@ send_burst(struct lcore_conf *qconf, uint16_t n, uint8_t port)
     return 0;
 }
 
+// zhou: just enqueue a packet into "tx_mbufs", sending in case of too much packets
+//       already buffered.
+//       "port" is supplied by FreeBSD stack.
 /* Enqueue a single packet, and send burst if queue is filled */
 static inline int
 send_single_packet(struct rte_mbuf *m, uint8_t port)
@@ -1367,6 +1480,7 @@ send_single_packet(struct rte_mbuf *m, uint8_t port)
     qconf->tx_mbufs[port].m_table[len] = m;
     len++;
 
+    // zhou: MAX_PKT_BURST == 32
     /* enough pkts to be sent */
     if (unlikely(len == MAX_PKT_BURST)) {
         send_burst(qconf, MAX_PKT_BURST, port);
@@ -1377,6 +1491,7 @@ send_single_packet(struct rte_mbuf *m, uint8_t port)
     return 0;
 }
 
+// zhou: used by FreeBSD to send packets.
 int
 ff_dpdk_if_send(struct ff_dpdk_if_context *ctx, void *m,
     int total)
@@ -1384,7 +1499,7 @@ ff_dpdk_if_send(struct ff_dpdk_if_context *ctx, void *m,
 #ifdef FF_USE_PAGE_ARRAY
     struct lcore_conf *qconf = &lcore_conf;
     int    len = 0;
-    
+
     len = ff_if_send_onepkt(ctx, m,total);
     if (unlikely(len == MAX_PKT_BURST)) {
         send_burst(qconf, MAX_PKT_BURST, ctx->port_id);
@@ -1442,6 +1557,7 @@ ff_dpdk_if_send(struct ff_dpdk_if_context *ctx, void *m,
 
     void *data = rte_pktmbuf_mtod(head, void*);
 
+    // zhou: Ethernet/IP/UDP/TCP headers already been filled by FreeBSD stack.
     if (offload.ip_csum) {
         /* ipv6 not supported yet */
         struct ipv4_hdr *iph;
@@ -1505,6 +1621,7 @@ ff_dpdk_if_send(struct ff_dpdk_if_context *ctx, void *m,
     return send_single_packet(head, ctx->port_id);
 }
 
+// zhou:
 static int
 main_loop(void *arg)
 {
@@ -1515,6 +1632,7 @@ main_loop(void *arg)
     int i, j, nb_rx, idle;
     uint16_t port_id, queue_id;
     struct lcore_conf *qconf;
+    // zhou: drain_tsc is ticks of BURST_TX_DRAIN_US
     uint64_t drain_tsc = 0;
     struct ff_dpdk_if_context *ctx;
 
@@ -1529,6 +1647,8 @@ main_loop(void *arg)
 
     while (1) {
         cur_tsc = rte_rdtsc();
+
+        // zhou: "freebsd_clock.expire" may be the next expired timer.
         if (unlikely(freebsd_clock.expire < cur_tsc)) {
             rte_timer_manage();
         }
@@ -1540,6 +1660,8 @@ main_loop(void *arg)
         /*
          * TX burst queue drain
          */
+        // zhou: we don't want send too frequent which may cause extra overhead cost.
+        //       So send in burst is efficient way.
         diff_tsc = cur_tsc - prev_tsc;
         if (unlikely(diff_tsc >= drain_tsc)) {
             for (i = 0; i < qconf->nb_tx_port; i++) {
@@ -1549,12 +1671,17 @@ main_loop(void *arg)
 
                 idle = 0;
 
+                // zhou: only send packets of this instance's buffer (packets from
+                //       FreeBSD stack).
                 send_burst(qconf,
                     qconf->tx_mbufs[port_id].len,
                     port_id);
+
                 qconf->tx_mbufs[port_id].len = 0;
             }
 
+            // zhou: it's better update "pre_tsc" in "send_burst()", since
+            //       it may be called in "send_single_packet()"
             prev_tsc = cur_tsc;
         }
 
@@ -1562,35 +1689,50 @@ main_loop(void *arg)
          * Read packet from RX queues
          */
         for (i = 0; i < qconf->nb_rx_queue; ++i) {
+
             port_id = qconf->rx_queue_list[i].port_id;
             queue_id = qconf->rx_queue_list[i].queue_id;
+
+            // zhou: "ctx" used by FreeBSD stack.
             ctx = veth_ctx[port_id];
 
 #ifdef FF_KNI
             if (enable_kni && rte_eal_process_type() == RTE_PROC_PRIMARY) {
+                // zhou: only let Primary instance to handle packets to/from
+                //       Linux kernel stack (not integrated FreeBSD stack).
                 ff_kni_process(port_id, queue_id, pkts_burst, MAX_PKT_BURST);
             }
 #endif
 
+            // zhou: handle dispatch ring (packets from other instance) firstly.
+            //       Just use "pkts_burst" memory temporary.
             process_dispatch_ring(port_id, queue_id, pkts_burst, ctx);
 
+
+            // zhou: transfer at most MAX_PKT_BURST packets to "pkts_burst".
             nb_rx = rte_eth_rx_burst(port_id, queue_id, pkts_burst,
                 MAX_PKT_BURST);
+
             if (nb_rx == 0)
                 continue;
 
             idle = 0;
 
+            // zhou: request prefetch at most 3 packets.
             /* Prefetch first packets */
             for (j = 0; j < PREFETCH_OFFSET && j < nb_rx; j++) {
                 rte_prefetch0(rte_pktmbuf_mtod(
                         pkts_burst[j], void *));
             }
 
+            // zhou: continues to request prefetch next packets, and processing
+            //       from first packet. handle [i], prefetch [i+PREFETCH_OFFSET].
             /* Prefetch and handle already prefetched packets */
             for (j = 0; j < (nb_rx - PREFETCH_OFFSET); j++) {
+
                 rte_prefetch0(rte_pktmbuf_mtod(pkts_burst[
                         j + PREFETCH_OFFSET], void *));
+
                 process_packets(port_id, queue_id, &pkts_burst[j], 1, ctx, 0);
             }
 
@@ -1600,16 +1742,23 @@ main_loop(void *arg)
             }
         }
 
+        // zhou: process request from debug tool.
         process_msg_ring(qconf->proc_id);
+
 
         div_tsc = rte_rdtsc();
 
         if (likely(lr->loop != NULL && (!idle || cur_tsc - usch_tsc >= drain_tsc))) {
             usch_tsc = cur_tsc;
+
+            // zhou: user supplied loop function. So, it should not block or take
+            //       take too much time.
             lr->loop(lr->arg);
         }
 
         idle_sleep_tsc = rte_rdtsc();
+
+        // zhou: when no more data need to send/recv, yield CPU for a while.
         if (likely(idle && idle_sleep)) {
             usleep(idle_sleep);
             end_tsc = rte_rdtsc();
@@ -1636,6 +1785,7 @@ main_loop(void *arg)
     return 0;
 }
 
+// zhou: notify TCP/IP stack up.
 int
 ff_dpdk_if_up(void) {
     int i;
@@ -1644,7 +1794,9 @@ ff_dpdk_if_up(void) {
         uint16_t port_id = qconf->tx_port_id[i];
 
         struct ff_port_cfg *pconf = &qconf->port_cfgs[port_id];
+
         veth_ctx[port_id] = ff_veth_attach(pconf);
+
         if (veth_ctx[port_id] == NULL) {
             rte_exit(EXIT_FAILURE, "ff_veth_attach failed");
         }
@@ -1653,13 +1805,18 @@ ff_dpdk_if_up(void) {
     return 0;
 }
 
+// zhou: master lcore
 void
 ff_dpdk_run(loop_func_t loop, void *arg) {
+
     struct loop_routine *lr = rte_malloc(NULL,
         sizeof(struct loop_routine), 0);
     lr->loop = loop;
     lr->arg = arg;
+
+    // zhou: block here due to "CALL_MASTER", this thread is master lcore.
     rte_eal_mp_remote_launch(main_loop, lr, CALL_MASTER);
+
     rte_eal_mp_wait_lcore();
     rte_free(lr);
 }
@@ -1693,6 +1850,9 @@ toeplitz_hash(unsigned keylen, const uint8_t *key,
     return (hash);
 }
 
+// zhou: since hardware already perform RSS as ethdev configured, why we still
+//       need to check it in TCP/IP stack ?
+//       F-Stack special.
 int
 ff_rss_check(void *softc, uint32_t saddr, uint32_t daddr,
     uint16_t sport, uint16_t dport)
@@ -1727,10 +1887,10 @@ ff_rss_check(void *softc, uint32_t saddr, uint32_t daddr,
 
     uint32_t hash = 0;
     if ( !use_rsskey_52bytes )
-        hash = toeplitz_hash(sizeof(default_rsskey_40bytes), 
+        hash = toeplitz_hash(sizeof(default_rsskey_40bytes),
             default_rsskey_40bytes, datalen, data);
     else
-        hash = toeplitz_hash(sizeof(default_rsskey_52bytes), 
+        hash = toeplitz_hash(sizeof(default_rsskey_52bytes),
 	    default_rsskey_52bytes, datalen, data);
     return ((hash & (reta_size - 1)) % nb_queues) == queueid;
 }
@@ -1748,4 +1908,3 @@ ff_get_tsc_ns()
     uint64_t hz = rte_get_tsc_hz();
     return ((double)cur_tsc/(double)hz) * NS_PER_S;
 }
-

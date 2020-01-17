@@ -87,6 +87,7 @@ parse_lcore_mask(struct ff_config *cfg, const char *coremask)
     }
     proc_lcore = cfg->dpdk.proc_lcore;
 
+
     /*
      * Remove all blank characters ahead and after.
      * Remove 0x/0X if exists.
@@ -112,6 +113,8 @@ parse_lcore_mask(struct ff_config *cfg, const char *coremask)
         val = xdigit2val(c);
         for (j = 0; j < BITS_PER_HEX && idx < RTE_MAX_LCORE; j++, idx++) {
             if ((1 << j) & val) {
+                // zhou: index used to identify proc id, and should less than user
+                //       defined core number.
                 proc_lcore[count] = idx;
                 if (cfg->dpdk.proc_id == count) {
                     zero_num = idx >> 2;
@@ -126,6 +129,7 @@ parse_lcore_mask(struct ff_config *cfg, const char *coremask)
         }
     }
 
+    // zhou: core must continous?
     for (; i >= 0; i--)
         if (coremask[i] != '0')
             return 0;
@@ -133,6 +137,7 @@ parse_lcore_mask(struct ff_config *cfg, const char *coremask)
     if (cfg->dpdk.proc_id >= count)
         return 0;
 
+    // zhou: total DPDK processes.
     cfg->dpdk.nb_procs = count;
 
     return 1;
@@ -251,6 +256,7 @@ __strstrip(char *s)
     return s;
 }
 
+// zhou: "arr" and "sz" will return the result.
 static int
 __parse_config_list(uint16_t *arr, int *sz, const char *value) {
     int i, j;
@@ -310,14 +316,18 @@ __parse_config_list(uint16_t *arr, int *sz, const char *value) {
     return 1;
 }
 
+// zhou: used to specify which lcore will take part to handle this port.
 static int
 parse_port_lcore_list(struct ff_port_cfg *cfg, const char *v_str)
 {
     cfg->nb_lcores = DPDK_MAX_LCORE;
     uint16_t *cores = cfg->lcore_list;
+
     return __parse_config_list(cores, &cfg->nb_lcores, v_str);
 }
 
+// zhou: user specify which port will be enabled by port_id, it's up to the sequence
+//       which DPDK probe ports.
 static int
 parse_port_list(struct ff_config *cfg, const char *v_str)
 {
@@ -334,14 +344,17 @@ parse_port_list(struct ff_config *cfg, const char *v_str)
         fprintf(stderr, "parse_port_list malloc failed\n");
         return 0;
     }
+    // zhou: fill up "portid_list"
     memcpy(portid_list, ports, sz*sizeof(uint16_t));
 
     cfg->dpdk.portid_list = portid_list;
     cfg->dpdk.nb_ports = sz;
     cfg->dpdk.max_portid = portid_list[sz-1];
+
     return res;
 }
 
+// zhou: handler for "[portX]" in config file.
 static int
 parse_port_slave_list(struct ff_port_cfg *cfg, const char *v_str)
 {
@@ -376,18 +389,24 @@ port_cfg_handler(struct ff_config *cfg, const char *section,
     }
 
     if (cfg->dpdk.port_cfgs == NULL) {
+        // zhou: in order to avoid search "cfg->dpdk.port_cfgs[]", we allocate
+        //       RTE_MAX_ETHPORTS slots, and offset by "port_id".
         struct ff_port_cfg *pc = calloc(RTE_MAX_ETHPORTS, sizeof(struct ff_port_cfg));
         if (pc == NULL) {
             fprintf(stderr, "port_cfg_handler malloc failed\n");
             return 0;
         }
+
         // initialize lcore list and nb_lcores
         int i;
         for (i = 0; i < cfg->dpdk.nb_ports; ++i) {
             uint16_t portid = cfg->dpdk.portid_list[i];
 
+            // zhou: pay attention to, here using "port_id" as index.
             struct ff_port_cfg *pconf = &pc[portid];
             pconf->port_id = portid;
+
+            // zhou: by default, all procs will handle this port.
             pconf->nb_lcores = ff_global_cfg.dpdk.nb_procs;
             memcpy(pconf->lcore_list, ff_global_cfg.dpdk.proc_lcore,
                    pconf->nb_lcores*sizeof(uint16_t));
@@ -425,6 +444,7 @@ port_cfg_handler(struct ff_config *cfg, const char *section,
     } else if (strcmp(name, "pcap") == 0) {
         cur->pcap = strdup(value);
     } else if (strcmp(name, "lcore_list") == 0) {
+        // zhou: lcores which will handle this port.
         return parse_port_lcore_list(cur, value);
     } else if (strcmp(name, "slave_port_list") == 0) {
         return parse_port_slave_list(cur, value);
@@ -547,6 +567,7 @@ bond_cfg_handler(struct ff_config *cfg, const char *section,
     return 1;
 }
 
+// zhou: "section" "name" "value", transform them into "ff_global_cfg".
 static int
 ini_parse_handler(void* user, const char* section, const char* name,
     const char* value)
@@ -556,6 +577,7 @@ ini_parse_handler(void* user, const char* section, const char* name,
     printf("[%s]: %s=%s\n", section, name, value);
 
     #define MATCH(s, n) strcmp(section, s) == 0 && strcmp(name, n) == 0
+
     if (MATCH("dpdk", "channel")) {
         pconfig->dpdk.nb_channel = atoi(value);
     } else if (MATCH("dpdk", "memory")) {
@@ -617,9 +639,9 @@ ini_parse_handler(void* user, const char* section, const char* name,
         return bond_cfg_handler(pconfig, section, name, value);
     } else if (strcmp(section, "pcap") == 0) {
         if (strcmp(name, "snaplen") == 0) {
-            pconfig->pcap.snap_len = (uint16_t)atoi(value);            
+            pconfig->pcap.snap_len = (uint16_t)atoi(value);
         } else if (strcmp(name, "savelen") == 0) {
-            pconfig->pcap.save_len = (uint32_t)atoi(value);            
+            pconfig->pcap.save_len = (uint32_t)atoi(value);
         } else if (strcmp(name, "enable") == 0) {
             pconfig->pcap.enable = (uint16_t)atoi(value);
         } else if (strcmp(name, "savepath") == 0) {
@@ -630,6 +652,7 @@ ini_parse_handler(void* user, const char* section, const char* name,
     return 1;
 }
 
+// zhou: transform config file into CLI arguments.
 static int
 dpdk_args_setup(struct ff_config *cfg)
 {
@@ -637,25 +660,32 @@ dpdk_args_setup(struct ff_config *cfg)
     dpdk_argv[n++] = strdup("f-stack");
     char temp[DPDK_CONFIG_MAXLEN] = {0}, temp2[DPDK_CONFIG_MAXLEN] = {0};
 
+    // zhou: don't use Hugepage
     if (cfg->dpdk.no_huge) {
         dpdk_argv[n++] = strdup("--no-huge");
     }
+
+    // zhou: due to single thread, multi-processes mode, only one core assigned.
     if (cfg->dpdk.proc_mask) {
         sprintf(temp, "-c%s", cfg->dpdk.proc_mask);
         dpdk_argv[n++] = strdup(temp);
     }
+
     if (cfg->dpdk.nb_channel) {
         sprintf(temp, "-n%d", cfg->dpdk.nb_channel);
         dpdk_argv[n++] = strdup(temp);
     }
+
     if (cfg->dpdk.memory) {
         sprintf(temp, "-m%d", cfg->dpdk.memory);
         dpdk_argv[n++] = strdup(temp);
     }
+
     if (cfg->dpdk.proc_type) {
         sprintf(temp, "--proc-type=%s", cfg->dpdk.proc_type);
         dpdk_argv[n++] = strdup(temp);
     }
+
     if (cfg->dpdk.base_virtaddr) {
         sprintf(temp, "--base-virtaddr=%s", cfg->dpdk.base_virtaddr);
         dpdk_argv[n++] = strdup(temp);
@@ -768,6 +798,7 @@ ff_parse_args(struct ff_config *cfg, int argc, char *const argv[])
                 cfg->filename = strdup(optarg);
                 break;
             case 'p':
+                // zhou: "proc_id" of all instances should be sequential.
                 cfg->dpdk.proc_id = atoi(optarg);
                 break;
             case 't':
@@ -830,6 +861,7 @@ ff_check_config(struct ff_config *cfg)
             } \
         } while (0)
 
+
     int i;
     for (i = 0; i < cfg->dpdk.nb_ports; i++) {
         uint16_t portid = cfg->dpdk.portid_list[i];
@@ -838,6 +870,7 @@ ff_check_config(struct ff_config *cfg)
         CHECK_VALID(netmask);
         CHECK_VALID(broadcast);
         CHECK_VALID(gateway);
+
         // check if the lcores in lcore_list are enabled.
         int k;
         for (k = 0; k < pc->nb_lcores; k++) {
@@ -848,15 +881,19 @@ ff_check_config(struct ff_config *cfg)
                 return -1;
             }
         }
+
         /*
          * only primary process process KNI, so if KNI enabled,
          * primary lcore must stay in every enabled ports' lcore_list
          */
+        // zhou: why ???
         if (cfg->kni.enable &&
             strcmp(cfg->dpdk.proc_type, "primary") == 0) {
+
             int found = 0;
             int j;
             uint16_t lcore_id = cfg->dpdk.proc_lcore[cfg->dpdk.proc_id];
+
             for (j = 0; j < pc->nb_lcores; j++) {
                 if (pc->lcore_list[j] == lcore_id) {
                     found = 1;
@@ -874,6 +911,8 @@ ff_check_config(struct ff_config *cfg)
     return 0;
 }
 
+// zhou: not specify all configuration attributes, since DPDK itself handle
+//       most default value.
 static void
 ff_default_config(struct ff_config *cfg)
 {
@@ -892,11 +931,14 @@ ff_default_config(struct ff_config *cfg)
     cfg->freebsd.mem_size = 256;
 }
 
+// zhou: parse config file
 int
 ff_load_config(int argc, char *const argv[])
 {
+    // zhou: set default config in "ff_global_cfg" firstly.
     ff_default_config(&ff_global_cfg);
 
+    // zhou: parsed CLI argument into "ff_global_cfg"
     int ret = ff_parse_args(&ff_global_cfg, argc, argv);
     if (ret < 0) {
         return ret;
@@ -904,6 +946,7 @@ ff_load_config(int argc, char *const argv[])
 
     ret = ini_parse(ff_global_cfg.filename, ini_parse_handler,
         &ff_global_cfg);
+
     if (ret != 0) {
         printf("parse %s failed on line %d\n", ff_global_cfg.filename, ret);
         return -1;

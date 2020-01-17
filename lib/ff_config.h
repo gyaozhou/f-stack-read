@@ -65,8 +65,11 @@ struct ff_port_cfg {
     uint16_t snaplen;
     uint32_t savelen;
 
+    // zhou: the lcore list which take part in to handle this port traffic.
+    //       By default, all processes will handle all enabled ports.
     int nb_lcores;
     int nb_slaves;
+    // zhou: index between 0 and nb_lcores, value is DPDK lcore id.
     uint16_t lcore_list[DPDK_MAX_LCORE];
     uint16_t *slave_portid_list;
 };
@@ -104,12 +107,19 @@ struct ff_freebsd_cfg {
     struct ff_freebsd_cfg *next;
 };
 
+// zhou: configuration
 struct ff_config {
     char *filename;
     struct {
+        // zhou: primary/secondary/auto
         char *proc_type;
+
+        // zhou: value of "[dpdk] lcore_mask:", which specified all cores used by
+        //       all DPDK processes (Primary and Secondary).
         /* mask of enabled lcores */
         char *lcore_mask;
+
+        // zhou: according to "proc_id", filter out which core this process running.
         /* mask of current proc on all lcores */
         char *proc_mask;
 
@@ -119,8 +129,13 @@ struct ff_config {
         int nb_channel;
         int memory;
         int no_huge;
+
+        // zhou: DPDK process number.
         int nb_procs;
+
+        // zhou: used to identify in Multi-process
         int proc_id;
+
         int promiscuous;
         int nb_vdev;
         int nb_bond;
@@ -129,18 +144,34 @@ struct ff_config {
         int tx_csum_offoad_skip;
         int vlan_strip;
 
+        // zhou: yield CPU, used avoid CPU busy loop.
         /* sleep x microseconds when no pkts incomming */
         unsigned idle_sleep;
 
         /* TX burst queue drain nodelay dalay time */
         unsigned pkt_tx_delay;
 
+        // zhou: The index is used to identify process instance, its value is
+        //       DPDK lcore id.
+        //       The max proc id should less than total lcore number defined by
+        //       "lcore_mask".
+        //       For example, coremask is 0xf0, proc_lcore[0] = 4, [1] = 5,
+        //       [2] = 6, [3] = 7.
         /* list of proc-lcore */
         uint16_t *proc_lcore;
 
+        // zhou: number of port user configured.
         int nb_ports;
+        // zhou: the max DPDK port id
         uint16_t max_portid;
+        // zhou: size of array is "nb_ports", but value of this array, DPDK port id
+        //       is not continuous, defined by user.
         uint16_t *portid_list;
+
+        // zhou: attributes of each port, index is DPDK port id , which specified
+        //       by user in config file "port_list".
+        //       Obviously, unlike "portid_list", there will be lots of holes in
+        //       "port_cfgs" array. But, it's helpful to access performance.
         // MAP(portid => struct ff_port_cfg*)
         struct ff_port_cfg *port_cfgs;
         struct ff_vdev_cfg *vdev_cfgs;
@@ -149,6 +180,7 @@ struct ff_config {
 
     struct {
         int enable;
+        // zhou: accept/reject by TCP&UDP port.
         char *method;
         char *tcp_port;
         char *udp_port;
@@ -172,7 +204,7 @@ struct ff_config {
         uint16_t enable;
         uint16_t snap_len;
         uint32_t save_len;
-        char*	 save_path;
+        char*   save_path;
     } pcap;
 };
 

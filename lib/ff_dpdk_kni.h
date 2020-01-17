@@ -35,7 +35,9 @@ extern int enable_kni;
 
 enum FilterReturn {
     FILTER_UNKNOWN = -1,
+    // zhou: ff-stack copy it to all instance.
     FILTER_ARP = 1,
+    // zhou: RX packet should be handover to vEth according to user defined rule.
     FILTER_KNI = 2,
 #ifdef INET6
     FILTER_NDP = 3,  // Neighbor Solicitation/Advertisement, Router Solicitation/Advertisement/Redirect

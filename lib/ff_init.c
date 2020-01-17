@@ -36,6 +36,8 @@ int
 ff_init(int argc, char * const argv[])
 {
     int ret;
+
+    // zhou: parse configuration file, and transform into format DPDK like.
     ret = ff_load_config(argc, argv);
     if (ret < 0)
         exit(1);
@@ -48,6 +50,7 @@ ff_init(int argc, char * const argv[])
     if (ret < 0)
         exit(1);
 
+    // zhou: notify FreeBSD's TCP/IP stack about the link layer up ?
     ret = ff_dpdk_if_up();
     if (ret < 0)
         exit(1);
@@ -60,4 +63,3 @@ ff_run(loop_func_t loop, void *arg)
 {
     ff_dpdk_run(loop, arg);
 }
-

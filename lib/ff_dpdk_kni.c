@@ -58,11 +58,14 @@ static const int magic_bits[8] = {
     0x8, 0x4, 0x2, 0x1
 };
 
+// zhou: TCP/UDP filter bitmap for KNI.
 static unsigned char *udp_port_bitmap = NULL;
 static unsigned char *tcp_port_bitmap = NULL;
 
+// zhou: bad naming, not only stats here.
 /* Structure type for recording kni interface specific stats */
 struct kni_interface_stats {
+    // zhou: corresponding vEth of this port.
     struct rte_kni *kni;
 
     /* number of pkts received from NIC, and sent to KNI */
@@ -70,7 +73,7 @@ struct kni_interface_stats {
 
     /* number of pkts received from NIC, but failed to send to KNI */
     uint64_t rx_dropped;
-
+nn
     /* number of pkts received from KNI, and sent to NIC */
     uint64_t tx_packets;
 
@@ -78,7 +81,11 @@ struct kni_interface_stats {
     uint64_t tx_dropped;
 };
 
+// zhou: a queue used to buffer packets received from port. PMD -> ring -> vEth
+//       The packets in "kni_rp" processed by Primary instance only.
 struct rte_ring **kni_rp;
+
+// zhou: index is DPDK port id
 struct kni_interface_stats **kni_stat;
 
 static void
@@ -160,7 +167,7 @@ kni_config_network_interface(uint16_t port_id, uint8_t if_up)
     }
 
     if (ret < 0)
-        printf("Failed to Configure network interface of %d %s\n", 
+        printf("Failed to Configure network interface of %d %s\n",
             port_id, if_up ? "up" : "down");
 
     return ret;
@@ -210,7 +217,10 @@ kni_process_tx(uint16_t port_id, uint16_t queue_id,
      * detail https://embedded.communities.intel.com/thread/6668
      */
     nb_kni_tx = rte_kni_tx_burst(kni_stat[port_id]->kni, pkts_burst, nb_tx);
+
+    // zhou: handle operations on vEth, such as config MTU.
     rte_kni_handle_request(kni_stat[port_id]->kni);
+
     if(nb_kni_tx < nb_tx) {
         uint16_t i;
         for(i = nb_kni_tx; i < nb_tx; ++i)
@@ -220,9 +230,11 @@ kni_process_tx(uint16_t port_id, uint16_t queue_id,
     }
 
     kni_stat[port_id]->rx_packets += nb_kni_tx;
+
     return 0;
 }
 
+// zhou: PMD TX thread, APP -> vEth -> PMD
 static int
 kni_process_rx(uint16_t port_id, uint16_t queue_id,
     struct rte_mbuf **pkts_burst, unsigned count)
@@ -231,6 +243,7 @@ kni_process_rx(uint16_t port_id, uint16_t queue_id,
 
     /* read packet from kni, and transmit to phy port */
     nb_kni_rx = rte_kni_rx_burst(kni_stat[port_id]->kni, pkts_burst, count);
+
     if (nb_kni_rx > 0) {
         nb_rx = rte_eth_tx_burst(port_id, queue_id, pkts_burst, nb_kni_rx);
         if (nb_rx < nb_kni_rx) {
@@ -420,30 +433,39 @@ ff_kni_proto_filter(const void *data, uint16_t len, uint16_t eth_frame_type)
     return protocol_filter_ip(data, len, eth_frame_type);
 }
 
+// zhou: Just init KNI system, have not created any vEth.
 void
 ff_kni_init(uint16_t nb_ports, const char *tcp_ports, const char *udp_ports)
 {
     if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
+
         kni_stat = rte_zmalloc("kni:stat",
             sizeof(struct kni_interface_stats *) * nb_ports,
             RTE_CACHE_LINE_SIZE);
+
         if (kni_stat == NULL)
             rte_exit(EXIT_FAILURE, "rte_zmalloc(1 (struct netio_kni_stat *)) "
                 "failed\n");
 
+        // zhou: "nb_ports" useless here. Just open device /dev/kni.
         rte_kni_init(nb_ports);
     }
 
     uint16_t lcoreid = rte_lcore_id();
+
+    // zhou: each instance own their own ring/port bitmap.
     char name_buf[RTE_RING_NAMESIZE];
     snprintf(name_buf, RTE_RING_NAMESIZE, "kni::ring_%d", lcoreid);
+
     kni_rp = rte_zmalloc(name_buf,
             sizeof(struct rte_ring *) * nb_ports,
             RTE_CACHE_LINE_SIZE);
+
     if (kni_rp == NULL) {
         rte_exit(EXIT_FAILURE, "rte_zmalloc(%s (struct rte_ring*)) "
                 "failed\n", name_buf);
     }
+
 
     snprintf(name_buf, RTE_RING_NAMESIZE, "kni:tcp_port_bitmap_%d", lcoreid);
     tcp_port_bitmap = rte_zmalloc("kni:tcp_port_bitmap", 8192,
@@ -468,11 +490,14 @@ ff_kni_init(uint16_t nb_ports, const char *tcp_ports, const char *udp_ports)
     kni_set_bitmap(udp_ports, udp_port_bitmap);
 }
 
+// zhou: create virtual ethernet device, "vEth" here is not VETH created in pair.
 void
 ff_kni_alloc(uint16_t port_id, unsigned socket_id,
     struct rte_mempool *mbuf_pool, unsigned ring_queue_size)
 {
+    // zhou: only Primary instance could allocate "rte_kni_alloc()"
     if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
+
         struct rte_kni_conf conf;
         struct rte_kni_ops ops;
         struct rte_eth_dev_info dev_info;
@@ -490,9 +515,11 @@ ff_kni_alloc(uint16_t port_id, unsigned socket_id,
         /* only support one kni */
         memset(&conf, 0, sizeof(conf));
         snprintf(conf.name, RTE_KNI_NAMESIZE, "veth%u", port_id);
+
         conf.core_id = rte_lcore_id();
         conf.force_bind = 1;
         conf.group_id = port_id;
+
         uint16_t mtu;
         rte_eth_dev_get_mtu(port_id, &mtu);
         conf.mbuf_size = mtu + KNI_ENET_HEADER_SIZE + KNI_ENET_FCS_SIZE;
@@ -507,7 +534,7 @@ ff_kni_alloc(uint16_t port_id, unsigned socket_id,
             conf.addr = pci_dev->addr;
             conf.id = pci_dev->id;
         }
-        
+
         /* Get the interface default mac address */
         rte_eth_macaddr_get(port_id,
                 (struct ether_addr *)&conf.mac_addr);
@@ -518,7 +545,9 @@ ff_kni_alloc(uint16_t port_id, unsigned socket_id,
         ops.config_network_if = kni_config_network_interface;
         ops.config_mac_address = kni_config_mac_address;
 
+        // zhou: create KNI create via ioctl() /dev/kni
         kni_stat[port_id]->kni = rte_kni_alloc(mbuf_pool, &conf, &ops);
+
         if (kni_stat[port_id]->kni == NULL)
             rte_panic("create kni on port %u failed!\n", port_id);
         else
@@ -530,15 +559,18 @@ ff_kni_alloc(uint16_t port_id, unsigned socket_id,
         kni_stat[port_id]->tx_dropped = 0;
     }
 
+    // zhou: each instance(equal to port) own a ring.
     char ring_name[RTE_KNI_NAMESIZE];
     snprintf((char*)ring_name, RTE_KNI_NAMESIZE, "kni_ring_%u", port_id);
 
     if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
-        kni_rp[port_id] = rte_ring_create(ring_name, ring_queue_size, 
+
+        kni_rp[port_id] = rte_ring_create(ring_name, ring_queue_size,
             socket_id, RING_F_SC_DEQ);
 
         if (rte_ring_lookup(ring_name) != kni_rp[port_id])
             rte_panic("lookup kni ring failed!\n");
+
     } else {
         kni_rp[port_id] = rte_ring_lookup(ring_name);
     }
@@ -550,14 +582,18 @@ ff_kni_alloc(uint16_t port_id, unsigned socket_id,
         rte_ring_free_count(kni_rp[port_id]));
 }
 
+// zhou: primary instance only. will be invoked in main_loop() in each round
 void
 ff_kni_process(uint16_t port_id, uint16_t queue_id,
     struct rte_mbuf **pkts_burst, unsigned count)
 {
+    // zhou: Just use "pkts_burst" memory temporary.
+
     kni_process_tx(port_id, queue_id, pkts_burst, count);
     kni_process_rx(port_id, queue_id, pkts_burst, count);
 }
 
+// zhou: packet received from PMD and pass to vEth.
 /* enqueue the packet, and own it */
 int
 ff_kni_enqueue(uint16_t port_id, struct rte_mbuf *pkt)
@@ -568,4 +604,3 @@ ff_kni_enqueue(uint16_t port_id, struct rte_mbuf *pkt)
 
     return 0;
 }
-

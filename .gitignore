@@ -27,3 +27,8 @@ app/nginx-1.16.0/objs/
 app/nginx-1.16.0/Makefile
 dpdk/.ci/
 dpdk/.travis.yml
+
+TAGS
+cscope.files
+cscope.out
+.DS_Store

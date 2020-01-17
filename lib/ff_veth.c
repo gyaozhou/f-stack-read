@@ -58,6 +58,7 @@
 #include "ff_config.h"
 #include "ff_dpdk_if.h"
 
+// zhou: this file does NOT handle KNI NIC, just handle interacting with FreeBSD.
 struct ff_veth_softc {
     struct ifnet *ifp;
     uint8_t mac[ETHER_ADDR_LEN];
@@ -132,6 +133,7 @@ int
 ff_mbuf_copydata(void *m, void *data, int off, int len)
 {
     int ret;
+    // zhou: "mbuf" comes from FreeBSD stack.
     struct mbuf *mb = (struct mbuf *)m;
 
     if (off + len > mb->m_pkthdr.len) {
@@ -215,7 +217,7 @@ ff_mbuf_get(void *m, void *data, uint16_t len)
     struct mbuf *mb = m_get(M_NOWAIT, MT_DATA);
 
     if (mb == NULL) {
-        return NULL; 
+        return NULL;
     }
 
     m_extadd(mb, data, len, NULL, NULL, NULL, 0, 0);
@@ -231,6 +233,7 @@ ff_mbuf_get(void *m, void *data, uint16_t len)
     return (void *)mb;
 }
 
+// zhou: handle received packet.
 void
 ff_veth_process_packet(void *arg, void *m)
 {
@@ -239,6 +242,7 @@ ff_veth_process_packet(void *arg, void *m)
 
     mb->m_pkthdr.rcvif = ifp;
 
+    // zhou: according to different L3 protocol, only IP varified.
     ifp->if_input(ifp, mb);
 }
 
@@ -325,6 +329,8 @@ ff_veth_setup_interface(struct ff_veth_softc *sc, struct ff_port_cfg *cfg)
     ifp->if_start = ff_veth_start;
     ifp->if_transmit = ff_veth_transmit;
     ifp->if_qflush = ff_veth_qflush;
+
+    // zhou:
     ether_ifattach(ifp, sc->mac);
 
     if (cfg->hw_features.rx_csum) {
@@ -421,7 +427,7 @@ ff_veth_softc_to_hostc(void *softc)
 
 /********************
 *  get next mbuf's addr, current mbuf's data and datalen.
-*  
+*
 ********************/
 int ff_next_mbuf(void **mbuf_bsd, void **data, unsigned *len)
 {
@@ -448,11 +454,11 @@ void * ff_mbuf_mtod(void* bsd_mbuf)
 void* ff_rte_frm_extcl(void* mbuf)
 {
     struct mbuf *bsd_mbuf = mbuf;
-    
+
     if ( bsd_mbuf->m_ext.ext_type==EXT_DISPOSABLE && bsd_mbuf->m_ext.ext_free==ff_mbuf_ext_free ){
         return bsd_mbuf->m_ext.ext_arg1;
     }
-    else 
+    else
         return NULL;
 }
 
@@ -463,4 +469,3 @@ ff_mbuf_set_vlan_info(void *hdr, uint16_t vlan_tci) {
     m->m_flags |= M_VLANTAG;
     return;
 }
-
